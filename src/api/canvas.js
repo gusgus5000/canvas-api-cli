@@ -92,7 +92,7 @@ export class CanvasAPI {
     for (const course of courses) {
       try {
         const assignments = await this.getAssignments(course.id);
-        allAssignments.push(...assignments.map(a => ({ ...a, course_name: course.name })));
+        allAssignments.push(...assignments.map(a => ({ ...a, course_name: course.name, course_id: course.id })));
       } catch (err) {
         console.log(chalk.yellow(`Could not fetch assignments for ${course.name}`));
       }
@@ -229,19 +229,55 @@ export class CanvasAPI {
   }
 
   async createCalendarEvent(eventData) {
-    const { data } = await this.client.post('/calendar_events', {
-      calendar_event: {
-        context_code: eventData.context_code,
-        title: eventData.title,
-        description: eventData.description,
-        start_at: eventData.start_at,
-        end_at: eventData.end_at,
-        location_name: eventData.location_name,
-        location_address: eventData.location_address,
-        all_day: eventData.all_day || false
+    try {
+      // For personal calendar, use 'user_' prefix with user ID
+      let contextCode = eventData.context_code;
+      
+      // If it's a personal calendar, we need to get the user ID first
+      if (contextCode === 'user_self') {
+        const user = await this.getCurrentUser();
+        contextCode = `user_${user.id}`;
       }
-    });
-    return data;
+      
+      const requestData = {
+        calendar_event: {
+          context_code: contextCode,
+          title: eventData.title
+        }
+      };
+      
+      // Only add optional fields if they have values
+      if (eventData.description) {
+        requestData.calendar_event.description = eventData.description;
+      }
+      if (eventData.start_at) {
+        requestData.calendar_event.start_at = eventData.start_at;
+      }
+      if (eventData.end_at) {
+        requestData.calendar_event.end_at = eventData.end_at;
+      }
+      if (eventData.location_name) {
+        requestData.calendar_event.location_name = eventData.location_name;
+      }
+      if (eventData.location_address) {
+        requestData.calendar_event.location_address = eventData.location_address;
+      }
+      if (eventData.all_day !== undefined) {
+        requestData.calendar_event.all_day = eventData.all_day;
+      }
+      
+      const { data } = await this.client.post('/calendar_events', requestData);
+      return data;
+    } catch (error) {
+      // Provide more detailed error information
+      if (error.response) {
+        const errorMsg = error.response.data?.errors?.[0]?.message || 
+                        error.response.data?.message || 
+                        error.response.statusText;
+        throw new Error(`Failed to create event: ${errorMsg} (Status: ${error.response.status})`);
+      }
+      throw error;
+    }
   }
 
   async updateCalendarEvent(eventId, eventData) {
@@ -259,69 +295,92 @@ export class CanvasAPI {
   }
 
   async submitAssignment(courseId, assignmentId, submission) {
-    const formData = new FormData();
-    
-    if (submission.type === 'online_text_entry') {
-      formData.append('submission[submission_type]', 'online_text_entry');
-      formData.append('submission[body]', submission.body);
-    } else if (submission.type === 'online_url') {
-      formData.append('submission[submission_type]', 'online_url');
-      formData.append('submission[url]', submission.url);
-    } else if (submission.type === 'online_upload' && submission.file_ids) {
-      formData.append('submission[submission_type]', 'online_upload');
-      submission.file_ids.forEach(id => {
-        formData.append('submission[file_ids][]', id);
-      });
-    }
-    
-    if (submission.comment) {
-      formData.append('comment[text_comment]', submission.comment);
-    }
-    
-    const { data } = await this.client.post(
-      `/courses/${courseId}/assignments/${assignmentId}/submissions`,
-      formData,
-      {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
+    try {
+      const formData = new FormData();
+      
+      if (submission.type === 'online_text_entry') {
+        formData.append('submission[submission_type]', 'online_text_entry');
+        formData.append('submission[body]', submission.body);
+      } else if (submission.type === 'online_url') {
+        formData.append('submission[submission_type]', 'online_url');
+        formData.append('submission[url]', submission.url);
+      } else if (submission.type === 'online_upload' && submission.file_ids) {
+        formData.append('submission[submission_type]', 'online_upload');
+        submission.file_ids.forEach(id => {
+          formData.append('submission[file_ids][]', id);
+        });
       }
-    );
-    return data;
+      
+      if (submission.comment) {
+        formData.append('comment[text_comment]', submission.comment);
+      }
+      
+      const { data } = await this.client.post(
+        `/courses/${courseId}/assignments/${assignmentId}/submissions`,
+        formData,
+        {
+          headers: {
+            ...formData.getHeaders(),
+            'Authorization': `Bearer ${this.token}`
+          }
+        }
+      );
+      return data;
+    } catch (error) {
+      if (error.response) {
+        const errorMsg = error.response.data?.errors?.join(', ') || 
+                        error.response.data?.message || 
+                        error.response.statusText;
+        throw new Error(`Failed to submit assignment: ${errorMsg} (Status: ${error.response.status})`);
+      }
+      throw error;
+    }
   }
 
   async uploadFile(courseId, file) {
-    const { data: uploadParams } = await this.client.post(
-      `/courses/${courseId}/files`,
-      {
-        name: file.name,
-        size: file.size,
-        content_type: file.type || 'application/octet-stream',
-        parent_folder_path: file.folder || '/'
+    try {
+      // Step 1: Get upload parameters from Canvas
+      const { data: uploadParams } = await this.client.post(
+        `/courses/${courseId}/files`,
+        {
+          name: file.name,
+          size: file.size,
+          content_type: file.type || 'application/octet-stream',
+          parent_folder_path: file.folder || '/'
+        }
+      );
+
+      // Step 2: Upload the file to the provided URL
+      const formData = new FormData();
+      Object.keys(uploadParams.upload_params).forEach(key => {
+        formData.append(key, uploadParams.upload_params[key]);
+      });
+      formData.append('file', file.content, file.name);
+
+      const uploadResponse = await axios.post(uploadParams.upload_url, formData, {
+        headers: formData.getHeaders()
+      });
+
+      // Step 3: Confirm the upload if needed
+      if (uploadResponse.status === 201) {
+        return uploadResponse.data;
       }
-    );
 
-    const formData = new FormData();
-    Object.keys(uploadParams.upload_params).forEach(key => {
-      formData.append(key, uploadParams.upload_params[key]);
-    });
-    formData.append('file', file.content);
-
-    const uploadResponse = await axios.post(uploadParams.upload_url, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
+      if (uploadResponse.headers.location) {
+        const { data: confirmedFile } = await this.client.get(
+          uploadResponse.headers.location
+        );
+        return confirmedFile;
       }
-    });
-
-    if (uploadResponse.status === 201) {
+      
       return uploadResponse.data;
+    } catch (error) {
+      if (error.response) {
+        const errorMsg = error.response.data?.message || error.response.statusText;
+        throw new Error(`Failed to upload file: ${errorMsg} (Status: ${error.response.status})`);
+      }
+      throw error;
     }
-
-    const { data: confirmedFile } = await this.client.get(
-      uploadResponse.headers.location
-    );
-    
-    return confirmedFile;
   }
 
   async createDiscussionEntry(courseId, topicId, message, parentId = null) {
