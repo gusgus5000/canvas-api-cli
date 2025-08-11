@@ -1,5 +1,6 @@
 import axios from 'axios';
 import chalk from 'chalk';
+import FormData from 'form-data';
 
 export class CanvasAPI {
   constructor(token, domain) {
@@ -225,5 +226,218 @@ export class CanvasAPI {
       course.name.toLowerCase().includes(query.toLowerCase()) ||
       course.course_code.toLowerCase().includes(query.toLowerCase())
     );
+  }
+
+  async createCalendarEvent(eventData) {
+    const { data } = await this.client.post('/calendar_events', {
+      calendar_event: {
+        context_code: eventData.context_code,
+        title: eventData.title,
+        description: eventData.description,
+        start_at: eventData.start_at,
+        end_at: eventData.end_at,
+        location_name: eventData.location_name,
+        location_address: eventData.location_address,
+        all_day: eventData.all_day || false
+      }
+    });
+    return data;
+  }
+
+  async updateCalendarEvent(eventId, eventData) {
+    const { data } = await this.client.put(`/calendar_events/${eventId}`, {
+      calendar_event: eventData
+    });
+    return data;
+  }
+
+  async deleteCalendarEvent(eventId, cancelReason = '') {
+    const { data } = await this.client.delete(`/calendar_events/${eventId}`, {
+      data: { cancel_reason: cancelReason }
+    });
+    return data;
+  }
+
+  async submitAssignment(courseId, assignmentId, submission) {
+    const formData = new FormData();
+    
+    if (submission.type === 'online_text_entry') {
+      formData.append('submission[submission_type]', 'online_text_entry');
+      formData.append('submission[body]', submission.body);
+    } else if (submission.type === 'online_url') {
+      formData.append('submission[submission_type]', 'online_url');
+      formData.append('submission[url]', submission.url);
+    } else if (submission.type === 'online_upload' && submission.file_ids) {
+      formData.append('submission[submission_type]', 'online_upload');
+      submission.file_ids.forEach(id => {
+        formData.append('submission[file_ids][]', id);
+      });
+    }
+    
+    if (submission.comment) {
+      formData.append('comment[text_comment]', submission.comment);
+    }
+    
+    const { data } = await this.client.post(
+      `/courses/${courseId}/assignments/${assignmentId}/submissions`,
+      formData,
+      {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      }
+    );
+    return data;
+  }
+
+  async uploadFile(courseId, file) {
+    const { data: uploadParams } = await this.client.post(
+      `/courses/${courseId}/files`,
+      {
+        name: file.name,
+        size: file.size,
+        content_type: file.type || 'application/octet-stream',
+        parent_folder_path: file.folder || '/'
+      }
+    );
+
+    const formData = new FormData();
+    Object.keys(uploadParams.upload_params).forEach(key => {
+      formData.append(key, uploadParams.upload_params[key]);
+    });
+    formData.append('file', file.content);
+
+    const uploadResponse = await axios.post(uploadParams.upload_url, formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    });
+
+    if (uploadResponse.status === 201) {
+      return uploadResponse.data;
+    }
+
+    const { data: confirmedFile } = await this.client.get(
+      uploadResponse.headers.location
+    );
+    
+    return confirmedFile;
+  }
+
+  async createDiscussionEntry(courseId, topicId, message, parentId = null) {
+    const params = {
+      message
+    };
+    
+    if (parentId) {
+      params.parent_id = parentId;
+    }
+    
+    const { data } = await this.client.post(
+      `/courses/${courseId}/discussion_topics/${topicId}/entries`,
+      params
+    );
+    return data;
+  }
+
+  async markAnnouncementRead(courseId, announcementId) {
+    await this.client.put(
+      `/courses/${courseId}/discussion_topics/${announcementId}/read`
+    );
+    return true;
+  }
+
+  async markAllAnnouncementsRead(courseId) {
+    await this.client.put(`/courses/${courseId}/discussion_topics/read_all`);
+    return true;
+  }
+
+  async createTodo(todoData) {
+    const { data } = await this.client.post('/users/self/todo', {
+      title: todoData.title,
+      description: todoData.description,
+      due_at: todoData.due_at,
+      course_id: todoData.course_id
+    });
+    return data;
+  }
+
+  async updateTodo(todoId, todoData) {
+    const { data } = await this.client.put(`/users/self/todo/${todoId}`, todoData);
+    return data;
+  }
+
+  async deleteTodo(todoId) {
+    await this.client.delete(`/users/self/todo/${todoId}`);
+    return true;
+  }
+
+  async createPlannerNote(noteData) {
+    const { data } = await this.client.post('/planner_notes', {
+      title: noteData.title,
+      details: noteData.details,
+      todo_date: noteData.todo_date,
+      course_id: noteData.course_id,
+      linked_object_type: noteData.linked_object_type,
+      linked_object_id: noteData.linked_object_id
+    });
+    return data;
+  }
+
+  async updatePlannerNote(noteId, noteData) {
+    const { data } = await this.client.put(`/planner_notes/${noteId}`, noteData);
+    return data;
+  }
+
+  async deletePlannerNote(noteId) {
+    await this.client.delete(`/planner_notes/${noteId}`);
+    return true;
+  }
+
+  async sendMessage(recipients, subject, body, courseId = null) {
+    const params = {
+      recipients,
+      subject,
+      body
+    };
+    
+    if (courseId) {
+      params.context_code = `course_${courseId}`;
+    }
+    
+    const { data } = await this.client.post('/conversations', params);
+    return data;
+  }
+
+  async replyToConversation(conversationId, message, attachmentIds = []) {
+    const params = {
+      body: message
+    };
+    
+    if (attachmentIds.length > 0) {
+      params.attachment_ids = attachmentIds;
+    }
+    
+    const { data } = await this.client.post(
+      `/conversations/${conversationId}/add_message`,
+      params
+    );
+    return data;
+  }
+
+  async markSubmissionRead(courseId, assignmentId) {
+    await this.client.put(
+      `/courses/${courseId}/assignments/${assignmentId}/submissions/self/read`
+    );
+    return true;
+  }
+
+  async getUploadParams(courseId, fileName, fileSize) {
+    const { data } = await this.client.post(`/courses/${courseId}/files`, {
+      name: fileName,
+      size: fileSize,
+      parent_folder_path: '/'
+    });
+    return data;
   }
 }
